@@ -78,10 +78,10 @@ redis-cli -p 6381 GET hello
 
 Each node runs:
 
-1. **Raft module** — handles leader election, heartbeats, and log replication (`src/raft/`)
-2. **Storage engine** — applies committed log entries to an in-memory map or LSM-tree (`src/storage/`)
-3. **Network layer** — async TCP server speaking RESP2, plus a separate gRPC-like channel for inter-node Raft traffic (`src/net/`)
-4. **Client protocol handler** — translates incoming commands (`GET`, `SET`, `DEL`, ...) into Raft log proposals
+1. **Raft core** — a *pure*, side-effect-free state machine handling leader election, heartbeats, log replication, and commitment (`src/raft/`). It consumes ticks/messages and emits messages/committed-entries; it never touches the clock or sockets, which is what makes the deterministic simulation possible.
+2. **Storage engine** — applies committed log entries to an in-memory map (default) or an LSM-tree (`src/storage/`, behind the `lsm` feature).
+3. **Network layer** — an async RESP2 TCP server for clients, plus a length-prefixed JSON channel for inter-node Raft traffic (`src/net/`).
+4. **Runtime driver** — the single task that owns the Raft core, drives it with a tick timer, fans messages to/from peers, applies committed writes, and unblocks waiting clients (`src/server.rs`).
 
 Writes always go through the leader and are only acknowledged once a majority of nodes have persisted them. Reads can be served from the leader (linearizable) or optionally from followers (eventually consistent, lower latency).
 
@@ -108,12 +108,37 @@ Supported commands:
 | `SET key value` | Write a key, replicated via Raft |
 | `GET key` | Read a key |
 | `DEL key` | Delete a key |
+| `PING [msg]` | Liveness check |
 | `CLUSTER STATUS` | Show current leader, term, and node health |
 | `CLUSTER MEMBERS` | List cluster members |
 
+### Feature flags
+
+| Flag | Effect |
+|---|---|
+| _(default)_ | In-memory storage, RESP2, in-process Raft |
+| `sim` | Compiles the deterministic simulation harness + tests |
+| `lsm` | Persistent LSM-tree storage backend |
+| `tls` | TLS for client and inter-node traffic |
+
+### Metrics
+
+With `--metrics-addr 127.0.0.1:9100`, scrape the Prometheus endpoint:
+
+```bash
+curl -s 127.0.0.1:9100
+# ferrium_sets_total 42
+# ferrium_is_leader 1
+# ferrium_current_term 3
+# ferrium_commit_index 128
+# ...
+```
+
 ## Benchmarks
 
-**Coming soon.** Once the storage engine and replication path stabilize, this section will include real numbers from `cargo bench`, along with the exact hardware and setup used, so results are reproducible.
+**End-to-end cluster numbers are coming soon.** Once the replication path
+stabilizes, this section will include real `SET`/`GET` throughput along with the
+exact hardware and setup used, so results are reproducible.
 
 | Operation | p50 | p99 | Throughput |
 |---|---|---|---|
@@ -121,7 +146,8 @@ Supported commands:
 | GET (leader) | — | — | — |
 | GET (follower, stale reads) | — | — | — |
 
-Run the benchmark suite yourself:
+Micro-benchmarks for the hot paths (RESP2 framing, command parsing, storage
+lookups) already run today:
 
 ```bash
 cargo bench
@@ -147,7 +173,26 @@ cargo test
 cargo test --features sim -- --test-threads=1
 
 # Lint
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features sim -- -D warnings
+
+# Format
+cargo fmt --all
+```
+
+### Project layout
+
+```
+src/
+├── protocol/   RESP2 framing + command parsing
+├── storage/    StorageEngine trait + in-memory backend
+├── raft/       consensus core (log, messages, pure state machine)
+├── net/        client server + inter-node peer transport
+├── apply.rs    encode/apply committed commands
+├── server.rs   runtime driver (owns the Raft core)
+├── metrics.rs  Prometheus counters/gauges
+└── sim.rs      deterministic in-memory cluster (feature = "sim")
+tests/          end-to-end + simulation tests
+benches/        micro-benchmarks
 ```
 
 Contributions are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
