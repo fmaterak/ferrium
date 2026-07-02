@@ -30,3 +30,11 @@ lsm = []
 tls = []
 # Deterministic simulation testing (network partitions, crashes).
 sim = []
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
